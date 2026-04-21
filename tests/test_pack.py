@@ -47,6 +47,7 @@ from dulwich.pack import (
     PackStreamReader,
     UnpackedObject,
     UnresolvedDeltas,
+    _apply_delta_py,
     _create_delta_py,
     _delta_encode_size,
     _encode_copy_operation,
@@ -251,6 +252,14 @@ class TestPackDeltas(TestCase):
     def test_apply_delta_truncated_insert(self) -> None:
         """Test apply_delta with a truncated insert operation."""
         self.assertRaises(ApplyDeltaError, apply_delta, b"", b"\x00\x01\x01")
+
+    def test_apply_delta_py_truncated_copy_offset(self) -> None:
+        """Test pure Python apply_delta with truncated copy offset."""
+        self.assertRaises(ApplyDeltaError, _apply_delta_py, b"", b"\x00\x01\x81")
+
+    def test_apply_delta_py_truncated_copy_size(self) -> None:
+        """Test pure Python apply_delta with truncated copy size."""
+        self.assertRaises(ApplyDeltaError, _apply_delta_py, b"a", b"\x01\x01\x91\x00")
 
     def test_create_delta_insert_only(self) -> None:
         """Test create_delta when only insertions are required."""

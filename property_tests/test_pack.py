@@ -28,7 +28,13 @@ from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from dulwich.errors import ApplyDeltaError
-from dulwich.pack import _create_delta_py, _delta_encode_size, apply_delta, create_delta
+from dulwich.pack import (
+    _apply_delta_py,
+    _create_delta_py,
+    _delta_encode_size,
+    apply_delta,
+    create_delta,
+)
 from tests import TestCase
 
 
@@ -100,12 +106,15 @@ class PackPropertyTests(TestCase):
 
     @given(bounded_delta_inputs())
     @example((b"", b"\x00\x01\x01"))
+    @example((b"", b"\x00\x01\x81"))
+    @example((b"a", b"\x01\x01\x91\x00"))
     def test_apply_delta_only_raises_apply_delta_error(
         self, base_and_delta: tuple[bytes, bytes]
     ) -> None:
         """Check that malformed deltas use the delta error type."""
         base, delta = base_and_delta
-        try:
-            apply_delta(base, delta)
-        except ApplyDeltaError:
-            pass
+        for delta_apply in (apply_delta, _apply_delta_py):
+            try:
+                delta_apply(base, delta)
+            except ApplyDeltaError:
+                pass

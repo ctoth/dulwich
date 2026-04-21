@@ -3712,7 +3712,7 @@ def _create_delta_py(base_buf: bytes, target_buf: bytes) -> Iterator[bytes]:
 create_delta = _create_delta_py
 
 
-def apply_delta(
+def _apply_delta_py(
     src_buf: bytes | list[bytes], delta: bytes | list[bytes]
 ) -> list[bytes]:
     """Based on the similar function in git's patch-delta.c.
@@ -3728,18 +3728,20 @@ def apply_delta(
     out = []
     index = 0
     delta_length = len(delta)
+    if delta_length < 4:
+        raise ApplyDeltaError("delta is too short")
 
     def get_delta_header_size(delta: bytes, index: int) -> tuple[int, int]:
         size = 0
         i = 0
-        while delta:
-            cmd = ord(delta[index : index + 1])
+        while index < delta_length:
+            cmd = delta[index]
             index += 1
             size |= (cmd & ~0x80) << i
             i += 7
             if not cmd & 0x80:
-                break
-        return size, index
+                return size, index
+        raise ApplyDeltaError("delta not empty")
 
     src_size, index = get_delta_header_size(delta, index)
     dest_size, index = get_delta_header_size(delta, index)
@@ -3748,20 +3750,24 @@ def apply_delta(
             f"Unexpected source buffer size: {src_size} vs {len(src_buf)}"
         )
     while index < delta_length:
-        cmd = ord(delta[index : index + 1])
+        cmd = delta[index]
         index += 1
         if cmd & 0x80:
             cp_off = 0
             for i in range(4):
                 if cmd & (1 << i):
-                    x = ord(delta[index : index + 1])
+                    if index >= delta_length:
+                        raise ApplyDeltaError("delta not empty")
+                    x = delta[index]
                     index += 1
                     cp_off |= x << (i * 8)
             cp_size = 0
             # Version 3 packs can contain copy sizes larger than 64K.
             for i in range(3):
                 if cmd & (1 << (4 + i)):
-                    x = ord(delta[index : index + 1])
+                    if index >= delta_length:
+                        raise ApplyDeltaError("delta not empty")
+                    x = delta[index]
                     index += 1
                     cp_size |= x << (i * 8)
             if cp_size == 0:
@@ -3786,6 +3792,10 @@ def apply_delta(
         raise ApplyDeltaError("dest size incorrect")
 
     return out
+
+
+# Default to pure Python delta application
+apply_delta = _apply_delta_py
 
 
 def write_pack_index_v2(

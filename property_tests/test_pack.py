@@ -28,7 +28,13 @@ from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from dulwich.errors import ApplyDeltaError
-from dulwich.pack import _create_delta_py, _delta_encode_size, apply_delta, create_delta
+from dulwich.pack import (
+    _apply_delta_py,
+    _create_delta_py,
+    _delta_encode_size,
+    apply_delta,
+    create_delta,
+)
 from tests import TestCase
 
 
@@ -48,6 +54,7 @@ settings.register_profile(
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "deterministic"))
 
 byte_strings = st.binary(max_size=256)
+non_empty_byte_strings = st.binary(min_size=1, max_size=256)
 
 
 @st.composite
@@ -56,7 +63,7 @@ def delta_pairs(draw) -> tuple[bytes, bytes]:
     prefix = draw(st.binary(max_size=128))
     suffix = draw(st.binary(max_size=128))
     base_middle = draw(st.binary(max_size=128))
-    target_middle = draw(st.binary(max_size=128))
+    target_middle = draw(st.binary(min_size=1, max_size=128))
     return prefix + base_middle + suffix, prefix + target_middle + suffix
 
 
@@ -70,14 +77,13 @@ def bounded_delta_inputs(draw) -> tuple[bytes, bytes]:
     return base, delta
 
 
-byte_pairs = st.one_of(st.tuples(byte_strings, byte_strings), delta_pairs())
+byte_pairs = st.one_of(st.tuples(byte_strings, non_empty_byte_strings), delta_pairs())
 
 
 class PackPropertyTests(TestCase):
     """Property tests for pack helpers."""
 
     @given(byte_pairs)
-    @example((b"", b""))
     @example((b"", b"Z" * 8192))
     @example((b"Z" * 8192, b"Z" * 8192))
     @example((b"Z" * 70000 + b"a", b"Z" * 70000 + b"b"))
@@ -88,7 +94,6 @@ class PackPropertyTests(TestCase):
         self.assertEqual(target, b"".join(apply_delta(base, delta)))
 
     @given(byte_pairs)
-    @example((b"", b""))
     @example((b"", b"Z" * 8192))
     @example((b"Z" * 8192, b"Z" * 8192))
     @example((b"Z" * 70000 + b"a", b"Z" * 70000 + b"b"))
@@ -99,13 +104,19 @@ class PackPropertyTests(TestCase):
         self.assertEqual(target, b"".join(apply_delta(base, delta)))
 
     @given(bounded_delta_inputs())
+    @example((b"", b""))
+    @example((b"", b"\x80"))
+    @example((b"", b"\x00\x00"))
     @example((b"", b"\x00\x01\x01"))
+    @example((b"", b"\x00\x01\x81"))
+    @example((b"a", b"\x01\x01\x91\x00"))
     def test_apply_delta_only_raises_apply_delta_error(
         self, base_and_delta: tuple[bytes, bytes]
     ) -> None:
         """Check that malformed deltas use the delta error type."""
         base, delta = base_and_delta
-        try:
-            apply_delta(base, delta)
-        except ApplyDeltaError:
-            pass
+        for delta_apply in (apply_delta, _apply_delta_py):
+            try:
+                delta_apply(base, delta)
+            except ApplyDeltaError:
+                pass

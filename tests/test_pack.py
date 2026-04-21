@@ -44,9 +44,12 @@ from dulwich.pack import (
     Pack,
     PackData,
     PackIndex3,
+    PackInflater,
     PackStreamReader,
+    SHA1Writer,
     UnpackedObject,
     UnresolvedDeltas,
+    _apply_delta_py,
     _create_delta_py,
     _delta_encode_size,
     _encode_copy_operation,
@@ -252,6 +255,67 @@ class TestPackDeltas(TestCase):
         """Test apply_delta with a truncated insert operation."""
         self.assertRaises(ApplyDeltaError, apply_delta, b"", b"\x00\x01\x01")
 
+    def test_apply_delta_rejects_empty_delta(self) -> None:
+        """Test apply_delta with a missing source header."""
+        self.assertRaises(ApplyDeltaError, apply_delta, b"", b"")
+        self.assertRaises(ApplyDeltaError, _apply_delta_py, b"", b"")
+
+    def test_apply_delta_rejects_too_short_delta(self) -> None:
+        """Test apply_delta with a delta shorter than Git's minimum size."""
+        self.assertRaises(ApplyDeltaError, apply_delta, b"", b"\x00\x00")
+        self.assertRaises(ApplyDeltaError, _apply_delta_py, b"", b"\x00\x00")
+        self.assertRaises(ApplyDeltaError, apply_delta, b"blob", b"\x04\x00")
+        self.assertRaises(ApplyDeltaError, _apply_delta_py, b"blob", b"\x04\x00")
+
+    def test_apply_delta_rejects_truncated_header(self) -> None:
+        """Test apply_delta with an unterminated source-size header."""
+        self.assertRaises(ApplyDeltaError, apply_delta, b"", b"\x80")
+        self.assertRaises(ApplyDeltaError, _apply_delta_py, b"", b"\x80")
+
+    def test_apply_delta_py_truncated_copy_offset(self) -> None:
+        """Test pure Python apply_delta with truncated copy offset."""
+        self.assertRaises(ApplyDeltaError, _apply_delta_py, b"", b"\x00\x01\x81")
+
+    def test_apply_delta_py_truncated_copy_size(self) -> None:
+        """Test pure Python apply_delta with truncated copy size."""
+        self.assertRaises(ApplyDeltaError, _apply_delta_py, b"a", b"\x01\x01\x91\x00")
+
+    def test_pack_inflater_rejects_too_short_commit_delta(self) -> None:
+        """Test PackInflater rejects deltas shorter than Git's minimum size."""
+        base = (
+            b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n"
+            b"author A <a@example.com> 0 +0000\n"
+            b"committer A <a@example.com> 0 +0000\n"
+            b"\n"
+            b"message\n"
+        )
+
+        f = BytesIO()
+        writer = SHA1Writer(f)
+        write_pack_header(writer.write, 2)
+        base_offset = f.tell()
+        write_pack_object(
+            writer.write,
+            Commit.type_num,
+            [base],
+            object_format=DEFAULT_OBJECT_FORMAT,
+        )
+        delta_offset = f.tell()
+        delta = _delta_encode_size(len(base)) + b"\x00"
+        write_pack_object(
+            writer.write,
+            OFS_DELTA,
+            (delta_offset - base_offset, [delta]),
+            object_format=DEFAULT_OBJECT_FORMAT,
+        )
+        writer.write_sha()
+
+        pack_data = f.getvalue()
+        f.seek(0)
+        data = PackData.from_file(f, DEFAULT_OBJECT_FORMAT, size=len(pack_data))
+        self.addCleanup(data.close)
+        self.assertRaises(ApplyDeltaError, list, PackInflater.for_pack_data(data))
+
     def test_create_delta_insert_only(self) -> None:
         """Test create_delta when only insertions are required."""
         base = b""
@@ -366,21 +430,14 @@ class TestPackDeltas(TestCase):
         result = b"".join(apply_delta(base, delta))
         self.assertEqual(target, result)
 
-        # Test case 7: Empty target
-        base = b"old content"
-        target = b""
-        delta = get_delta(base, target)
-        result = b"".join(apply_delta(base, delta))
-        self.assertEqual(target, result)
-
-        # Test case 8: Large content
+        # Test case 7: Large content
         base = b"x" * 10000
         target = b"x" * 9000 + b"y" * 1000
         delta = get_delta(base, target)
         result = b"".join(apply_delta(base, delta))
         self.assertEqual(target, result)
 
-        # Test case 9: Multiple changes
+        # Test case 8: Multiple changes
         base = b"line1\nline2\nline3\nline4\n"
         target = b"line1\nmodified2\nline3\nmodified4\n"
         delta = get_delta(base, target)
@@ -407,7 +464,6 @@ class TestPackDeltas(TestCase):
             return b"".join(result)
 
         test_cases = [
-            (b"", b""),
             (b"a", b"a"),
             (b"abc", b"abc"),
             (b"abc", b"def"),

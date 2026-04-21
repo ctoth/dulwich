@@ -96,7 +96,7 @@ fn bisect_find_sha(
     Ok(None)
 }
 
-fn get_delta_header_size(delta: &[u8], index: &mut usize, length: usize) -> usize {
+fn get_delta_header_size(delta: &[u8], index: &mut usize, length: usize) -> PyResult<usize> {
     let mut size: usize = 0;
     let mut i: usize = 0;
     while *index < length {
@@ -105,10 +105,10 @@ fn get_delta_header_size(delta: &[u8], index: &mut usize, length: usize) -> usiz
         size |= ((cmd & !0x80) as usize) << i;
         i += 7;
         if cmd & 0x80 == 0 {
-            break;
+            return Ok(size);
         }
     }
-    size
+    Err(ApplyDeltaError::new_err("delta not empty"))
 }
 
 fn py_chunked_as_string<'a>(
@@ -146,9 +146,12 @@ fn apply_delta(py: Python, py_src_buf: Py<PyAny>, py_delta: Py<PyAny>) -> PyResu
 
     let src_buf_len = src_buf.len();
     let delta_len = delta.len();
+    if delta_len < 4 {
+        return Err(ApplyDeltaError::new_err("delta is too short"));
+    }
     let mut index = 0;
 
-    let src_size = get_delta_header_size(delta.as_ref(), &mut index, delta_len);
+    let src_size = get_delta_header_size(delta.as_ref(), &mut index, delta_len)?;
     if src_size != src_buf_len {
         return Err(ApplyDeltaError::new_err(format!(
             "Unexpected source buffer size: {} vs {}",
@@ -156,7 +159,7 @@ fn apply_delta(py: Python, py_src_buf: Py<PyAny>, py_delta: Py<PyAny>) -> PyResu
         )));
     }
 
-    let dest_size = get_delta_header_size(delta.as_ref(), &mut index, delta_len);
+    let dest_size = get_delta_header_size(delta.as_ref(), &mut index, delta_len)?;
     let mut out = vec![0; dest_size];
     let mut outindex = 0;
 
@@ -439,17 +442,26 @@ mod tests {
         // Test decoding various encoded sizes
         let mut index = 0;
         let delta = vec![0x00];
-        assert_eq!(get_delta_header_size(&delta, &mut index, delta.len()), 0);
+        assert_eq!(
+            get_delta_header_size(&delta, &mut index, delta.len()).unwrap(),
+            0
+        );
         assert_eq!(index, 1);
 
         let mut index = 0;
         let delta = vec![0x01];
-        assert_eq!(get_delta_header_size(&delta, &mut index, delta.len()), 1);
+        assert_eq!(
+            get_delta_header_size(&delta, &mut index, delta.len()).unwrap(),
+            1
+        );
         assert_eq!(index, 1);
 
         let mut index = 0;
         let delta = vec![127];
-        assert_eq!(get_delta_header_size(&delta, &mut index, delta.len()), 127);
+        assert_eq!(
+            get_delta_header_size(&delta, &mut index, delta.len()).unwrap(),
+            127
+        );
         assert_eq!(index, 1);
     }
 
@@ -458,21 +470,38 @@ mod tests {
         // Test decoding multi-byte sizes
         let mut index = 0;
         let delta = vec![0x80, 0x01];
-        assert_eq!(get_delta_header_size(&delta, &mut index, delta.len()), 128);
+        assert_eq!(
+            get_delta_header_size(&delta, &mut index, delta.len()).unwrap(),
+            128
+        );
         assert_eq!(index, 2);
 
         let mut index = 0;
         let delta = vec![0x80, 0x02];
-        assert_eq!(get_delta_header_size(&delta, &mut index, delta.len()), 256);
+        assert_eq!(
+            get_delta_header_size(&delta, &mut index, delta.len()).unwrap(),
+            256
+        );
         assert_eq!(index, 2);
 
         let mut index = 0;
         let delta = vec![0x80, 0x80, 0x01];
         assert_eq!(
-            get_delta_header_size(&delta, &mut index, delta.len()),
+            get_delta_header_size(&delta, &mut index, delta.len()).unwrap(),
             16384
         );
         assert_eq!(index, 3);
+    }
+
+    #[test]
+    fn test_get_delta_header_size_truncated() {
+        let mut index = 0;
+        let delta = vec![0x80];
+        assert!(get_delta_header_size(&delta, &mut index, delta.len()).is_err());
+
+        let mut index = 0;
+        let delta = vec![];
+        assert!(get_delta_header_size(&delta, &mut index, delta.len()).is_err());
     }
 
     #[test]
@@ -483,7 +512,7 @@ mod tests {
         for value in test_values {
             let encoded = delta_encode_size(value);
             let mut index = 0;
-            let decoded = get_delta_header_size(&encoded, &mut index, encoded.len());
+            let decoded = get_delta_header_size(&encoded, &mut index, encoded.len()).unwrap();
             assert_eq!(
                 decoded, value,
                 "Roundtrip failed for value {}: encoded {:?}, decoded {}",
@@ -628,10 +657,10 @@ mod tests {
 
         // Apply delta should reconstruct target
         let mut index = 0;
-        let src_size = get_delta_header_size(&delta, &mut index, delta.len());
+        let src_size = get_delta_header_size(&delta, &mut index, delta.len()).unwrap();
         assert_eq!(src_size, base.len());
 
-        let dest_size = get_delta_header_size(&delta, &mut index, delta.len());
+        let dest_size = get_delta_header_size(&delta, &mut index, delta.len()).unwrap();
         assert_eq!(dest_size, target.len());
 
         // The delta should be valid and smaller than sending the full target
